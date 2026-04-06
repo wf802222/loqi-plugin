@@ -40,7 +40,7 @@ if [ -n "$LOQI_SOURCE" ] && [ -d "$LOQI_SOURCE" ]; then
 else
     # Production: install from PyPI
     echo "Installing from PyPI..."
-    "$PIP" install loqi --quiet
+    "$PIP" install loqi-memory --quiet
 fi
 
 # Step 4: Pre-download the embedding model
