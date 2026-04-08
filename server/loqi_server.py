@@ -5,11 +5,13 @@ Runs on localhost:9471. Auto-exits after 30 minutes of inactivity.
 
 Start:  python loqi_server.py
 Check:  curl http://localhost:9471/ping
+Logs:   ~/.loqi/server.log
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import sys
 import time
 import traceback
@@ -25,17 +27,35 @@ from server.lifecycle import IdleShutdown, write_pid, remove_pid
 from server.project_manager import ProjectManager
 
 PORT = 9471
+LOG_DIR = Path.home() / ".loqi"
+LOG_PATH = LOG_DIR / "server.log"
+
 _start_time = time.time()
 _manager: ProjectManager | None = None
 _idle: IdleShutdown | None = None
+log = logging.getLogger("loqi")
+
+
+def setup_logging() -> None:
+    """Configure logging to file at ~/.loqi/server.log."""
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    handler = logging.FileHandler(str(LOG_PATH), encoding="utf-8")
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s %(levelname)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+    ))
+
+    root = logging.getLogger("loqi")
+    root.setLevel(logging.INFO)
+    root.addHandler(handler)
 
 
 class LoqiHandler(BaseHTTPRequestHandler):
     """HTTP request handler for Loqi memory operations."""
 
     def log_message(self, format, *args):
-        """Suppress default stderr logging."""
-        pass
+        """Log HTTP requests to file instead of stderr."""
+        log.info(format, *args)
 
     def _send_json(self, data: dict, status: int = 200) -> None:
         body = json.dumps(data).encode("utf-8")
@@ -51,6 +71,13 @@ class LoqiHandler(BaseHTTPRequestHandler):
             return {}
         raw = self.rfile.read(length)
         return json.loads(raw)
+
+    def _check_model_ready(self) -> bool:
+        """Return True if model is ready. Sends 503 and returns False if not."""
+        if not _manager or not _manager.model_loaded:
+            self._send_json({"error": "Model not ready", "retry": True}, 503)
+            return False
+        return True
 
     def do_GET(self) -> None:
         global _idle
@@ -83,9 +110,13 @@ class LoqiHandler(BaseHTTPRequestHandler):
             else:
                 self._send_json({"error": "Not found"}, 404)
         except Exception as e:
-            self._send_json({"error": str(e), "trace": traceback.format_exc()}, 500)
+            log.error("Error handling %s: %s\n%s", self.path, e, traceback.format_exc())
+            self._send_json({"error": str(e)}, 500)
 
     def _handle_query(self) -> None:
+        if not self._check_model_ready():
+            return
+
         data = self._read_json()
         project_path = data.get("project_path", "")
         query = data.get("query", "")
@@ -100,6 +131,9 @@ class LoqiHandler(BaseHTTPRequestHandler):
         self._send_json(result)
 
     def _handle_index(self) -> None:
+        if not self._check_model_ready():
+            return
+
         data = self._read_json()
         project_path = data.get("project_path", "")
         doc_id = data.get("doc_id", "")
@@ -168,24 +202,29 @@ class LoqiHandler(BaseHTTPRequestHandler):
 def main():
     global _manager, _idle
 
+    setup_logging()
     write_pid()
 
     try:
-        print(f"Loqi server starting on port {PORT}...", flush=True)
+        log.info("Loqi server starting on port %d...", PORT)
         _manager = ProjectManager()
-        print("Embedding model ready.", flush=True)
+        log.info("Server ready.")
 
         _idle = IdleShutdown()
 
         server = HTTPServer(("127.0.0.1", PORT), LoqiHandler)
-        print(f"Loqi server listening on http://127.0.0.1:{PORT}", flush=True)
+        log.info("Listening on http://127.0.0.1:%d", PORT)
         server.serve_forever()
     except KeyboardInterrupt:
-        pass
+        log.info("Shutdown requested.")
     except OSError as e:
         if "Address already in use" in str(e) or "10048" in str(e):
-            print(f"Port {PORT} already in use — another Loqi server is likely running.", flush=True)
+            log.warning("Port %d already in use — another server is likely running.", PORT)
             sys.exit(0)
+        log.error("Startup error: %s", e, exc_info=True)
+        raise
+    except Exception as e:
+        log.error("Fatal error: %s", e, exc_info=True)
         raise
     finally:
         remove_pid()

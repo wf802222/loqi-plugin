@@ -88,21 +88,27 @@ def start_server() -> bool:
 
     env = server_env()
 
-    # Start as detached background process
+    # Ensure log directory exists
+    log_dir = Path.home() / ".loqi"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / "server.log"
+
+    # Start as detached background process with log output
+    stderr_out = open(log_file, "a")
     if sys.platform == "win32":
         CREATE_NO_WINDOW = 0x08000000
         subprocess.Popen(
             [python, server_script],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=stderr_out,
+            stderr=stderr_out,
             env=env,
             creationflags=CREATE_NO_WINDOW,
         )
     else:
         subprocess.Popen(
             [python, server_script],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=stderr_out,
+            stderr=stderr_out,
             env=env,
             start_new_session=True,
         )

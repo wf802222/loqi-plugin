@@ -8,9 +8,24 @@ part). Each project gets its own SQLite database at .loqi/memory.db.
 from __future__ import annotations
 
 import json
+import logging
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
+
+log = logging.getLogger("loqi")
+
+
+def _resolve_path(p: str) -> str:
+    """Resolve a project path to a native OS path.
+
+    Handles Git Bash POSIX paths on Windows: /c/Users/... -> C:\\Users\\...
+    """
+    m = re.match(r"^/([a-zA-Z])/(.*)", p)
+    if m:
+        p = f"{m.group(1).upper()}:/{m.group(2)}"
+    return str(Path(p).resolve())
 
 import numpy as np
 
@@ -36,7 +51,7 @@ class ProjectState:
         self._model = model
         self._config = config
 
-        loqi_dir = Path(project_path) / ".loqi"
+        loqi_dir = Path(_resolve_path(project_path)) / ".loqi"
         loqi_dir.mkdir(parents=True, exist_ok=True)
 
         db_path = str(loqi_dir / "memory.db")
@@ -76,8 +91,18 @@ class ProjectState:
             )
         else:
             self._section_embeddings = None
+            if all_nodes:
+                log.warning(
+                    "%d nodes in store but 0 sections after filtering — "
+                    "possible embedding deserialization failure",
+                    len(all_nodes),
+                )
 
         self._explicit_triggers = self._store.get_all_triggers()
+        log.info(
+            "Cache rebuilt: %d sections, %d triggers",
+            len(self._section_nodes), len(self._explicit_triggers),
+        )
 
     def _load_episodes(self) -> None:
         """Load episodes from disk into the episode log."""
@@ -265,6 +290,12 @@ class ProjectState:
         explicit = sum(1 for t in all_triggers if t.origin == TriggerOrigin.EXPLICIT)
         hebbian = sum(1 for t in all_triggers if t.origin == TriggerOrigin.HEBBIAN)
 
+        # Database file size
+        db_path = Path(_resolve_path(self.project_path)) / ".loqi" / "memory.db"
+        db_size_mb = 0.0
+        if db_path.exists():
+            db_size_mb = round(db_path.stat().st_size / (1024 * 1024), 1)
+
         return {
             "nodes": self._store.get_node_count(),
             "sections": len(self._section_nodes),
@@ -272,6 +303,7 @@ class ProjectState:
             "triggers_explicit": explicit,
             "triggers_hebbian": hebbian,
             "episodes": len(self._episode_log),
+            "db_size_mb": db_size_mb,
         }
 
 
@@ -280,13 +312,22 @@ class ProjectManager:
 
     def __init__(self):
         self._model = EmbeddingModel()
+        # Eager load: force the model to initialize now instead of on first query
+        log.info("Loading embedding model...")
+        self._model.encode_single("warmup")
+        log.info("Embedding model ready.")
         self._config = LOQI_FULL
         self._projects: dict[str, ProjectState] = {}
 
     def get(self, project_path: str) -> ProjectState:
-        """Get or create state for a project."""
-        key = os.path.normpath(project_path)
+        """Get or create state for a project.
+
+        Resolves POSIX paths (/c/Users/...) to Windows paths (C:\\Users\\...)
+        so the correct .loqi/memory.db is found regardless of shell.
+        """
+        key = _resolve_path(project_path)
         if key not in self._projects:
+            log.info("Opening project: %s", key)
             self._projects[key] = ProjectState(key, self._model, self._config)
         return self._projects[key]
 
